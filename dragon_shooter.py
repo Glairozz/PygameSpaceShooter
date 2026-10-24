@@ -247,7 +247,7 @@ class Game:
         self.round = 1
         self.enemy = Enemy(self.round)
         self.score = 0
-        self.game_state = "playing"  # playing, paused, game_over, victory
+        self.game_state = "landing"  # landing, playing, paused, game_over, victory
         self.asteroid_spawn_timer = 0
         self.particles = []
         
@@ -396,6 +396,67 @@ class Game:
         self.screen.blit(subtext, subtext_rect)
         self.screen.blit(restart_text, restart_rect)
         
+    def draw_landing_page(self):
+        # Background stars
+        random.seed(42)  # Fixed seed for consistent stars
+        for _ in range(100):
+            x = random.randint(0, WIDTH)
+            y = random.randint(0, HEIGHT)
+            size = random.choice([1, 1, 2])  # Mix of star sizes
+            brightness = random.choice([WHITE, LIGHT_BLUE, WHITE])
+            pygame.draw.circle(self.screen, brightness, (x, y), size)
+        random.seed()  # Reset seed
+        
+        # Title
+        title_font = pygame.font.Font(None, 72)
+        title = title_font.render("DRAGON ROASTER", True, YELLOW)
+        title_rect = title.get_rect(center=(WIDTH // 2, HEIGHT // 4))
+        self.screen.blit(title, title_rect)
+        
+        # Subtitle
+        subtitle = self.font.render("Space Battle Adventure", True, CYAN)
+        subtitle_rect = subtitle.get_rect(center=(WIDTH // 2, HEIGHT // 4 + 60))
+        self.screen.blit(subtitle, subtitle_rect)
+        
+        # Instructions box
+        box_rect = pygame.Rect(WIDTH // 2 - 200, HEIGHT // 2 - 80, 400, 240)
+        pygame.draw.rect(self.screen, DARK_BLUE, box_rect, 3)
+        
+        instructions = [
+            "HOW TO PLAY:",
+            "",
+            "WASD/Arrow Keys - Move spaceship",
+            "SPACE - Fire lasers",
+            "P - Pause game",
+            "R - Restart game",
+            "O - Quit game",
+            "",
+            "Defeat all 5 boss rounds to win!"
+        ]
+        
+        y_offset = HEIGHT // 2 - 60
+        for i, instruction in enumerate(instructions):
+            if i == 0:  # Title
+                text = self.font.render(instruction, True, YELLOW)
+            else:  # Regular text
+                text = self.small_font.render(instruction, True, WHITE)
+            text_rect = text.get_rect(center=(WIDTH // 2, y_offset))
+            self.screen.blit(text, text_rect)
+            y_offset += 25 if i == 0 else 20
+        
+        # Start button
+        button_rect = pygame.Rect(WIDTH // 2 - 100, HEIGHT - 200, 200, 60)
+        pygame.draw.rect(self.screen, GREEN, button_rect)
+        pygame.draw.rect(self.screen, WHITE, button_rect, 3)
+        
+        start_text = self.font.render("START GAME", True, BLACK)
+        start_rect = start_text.get_rect(center=(WIDTH // 2, HEIGHT - 170))
+        self.screen.blit(start_text, start_rect)
+        
+        # Flashing effect for button
+        pygame.time.get_ticks()
+        return button_rect
+        
     def draw_pause(self):
         overlay = pygame.Surface((WIDTH, HEIGHT))
         overlay.set_alpha(128)
@@ -432,6 +493,13 @@ class Game:
                         laser = self.spaceship.shoot()
                         if laser:
                             self.player_lasers.append(laser)
+                            
+                if event.type == pygame.MOUSEBUTTONDOWN and self.game_state == "landing":
+                    mouse_pos = pygame.mouse.get_pos()
+                    button_rect = pygame.Rect(WIDTH // 2 - 100, HEIGHT - 200, 200, 60)
+                    if button_rect.collidepoint(mouse_pos):
+                        self.game_state = "playing"
+                        self.reset_game()
                             
             if self.game_state == "playing":
                 keys = pygame.key.get_pressed()
@@ -482,17 +550,19 @@ class Game:
             # Drawing
             self.screen.fill(BLACK)
             
-            # Draw background stars
-            random.seed(42)  # Fixed seed for consistent stars
-            for _ in range(100):
-                x = random.randint(0, WIDTH)
-                y = random.randint(0, HEIGHT)
-                size = random.choice([1, 1, 2])  # Mix of star sizes
-                brightness = random.choice([WHITE, LIGHT_BLUE, WHITE])
-                pygame.draw.circle(self.screen, brightness, (x, y), size)
-            random.seed()  # Reset seed
-            
-            if self.game_state != "game_over" and self.game_state != "victory":
+            if self.game_state == "landing":
+                button_rect = self.draw_landing_page()
+            else:
+                # Draw background stars
+                random.seed(42)  # Fixed seed for consistent stars
+                for _ in range(100):
+                    x = random.randint(0, WIDTH)
+                    y = random.randint(0, HEIGHT)
+                    size = random.choice([1, 1, 2])  # Mix of star sizes
+                    brightness = random.choice([WHITE, LIGHT_BLUE, WHITE])
+                    pygame.draw.circle(self.screen, brightness, (x, y), size)
+                random.seed()  # Reset seed
+            if self.game_state != "landing" and self.game_state != "game_over" and self.game_state != "victory":
                 self.spaceship.draw(self.screen)
                 if self.enemy:
                     self.enemy.draw(self.screen)
@@ -505,11 +575,12 @@ class Game:
                 for asteroid in self.asteroids:
                     asteroid.draw(self.screen)
                     
-            self.draw_particles()
-            self.draw_ui()
-            
-            if self.game_state == "paused":
-                self.draw_pause()
+                self.draw_particles()
+                self.draw_ui()
+                
+                if self.game_state == "paused":
+                    self.draw_pause()
+                    
             elif self.game_state in ["game_over", "victory"]:
                 self.draw_game_over()
                 
