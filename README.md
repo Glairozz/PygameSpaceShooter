@@ -1,29 +1,41 @@
 # Dragon Roaster - Enhanced Space Shooter
 
-A polished, feature-rich 2D space shooter built with Python and Pygame. Fight through waves of enemies and bosses, collect power-ups, and aim for the high score!
+A polished, feature-rich arcade shooter built with Python and Pygame. Fight through 7 boss waves, build up huge combos, collect power-ups, unlock achievements, and chase a new high score.
+
+## What's New in v3
+
+- **Fully redesigned bosses** - 7 unique boss fighters with evolving attack patterns that get more aggressive as their HP drops
+- **Procedural audio** - All sound effects are synthesised at runtime (no audio files required)
+- **Combo system** - Chain hits together to build a multiplier and score big bonuses
+- **Richer power-ups** - Health, shield, rapid fire, spread shot, bomb, extra life, and the new Overdrive
+- **Screen shake, particles & floating text** - Big, punchy feedback on every hit and explosion
+- **Achievements & stats** - Track progress (bosses defeated, power-ups, lasers fired) with toast notifications
+- **Lives system** - Start with 3 lives, respawn on hit with a short grace period
+- **Smarter save system** - Safe JSON saves with automatic backups and schema migration
+- **Mute toggle** - Hit `M` anytime to silence/restore sound
 
 ## Features
 
 ### Gameplay
-- **Smooth Controls**: Responsive WASD/Arrow key movement with proper screen boundaries
-- **Dynamic Combat**: Player and enemy lasers with collision detection
-- **Multiple Enemy Types**: Progressively challenging bosses across 6 rounds
-- **Power-Up System**: Health, shields, rapid fire, spread shot, and bomb power-ups
-- **Particle Effects**: Explosions, hits, and visual feedback
-- **Screen Shake**: Impact feedback for powerful hits
-- **Parallax Starfield**: Multi-layer animated background
+- **Responsive controls** - Smooth WASD/Arrow key movement with delta-time aware updates
+- **Tight combat** - Player/enemy lasers, asteroids, and accurate collision detection
+- **Progressive difficulty** - Bosses grow stronger across all 7 waves
+- **Power-up drops** - Chance-based pickups keep every run different
+- **Screen shake** - Impactful feedback for big hits
 
 ### UI & Menus
-- **Polished Main Menu**: Clean space-themed interface
-- **In-Game HUD**: Health, shield, score, round, and active power-up timers
-- **Boss Health Bar**: Clear indicator during boss fights
-- **Pause Menu**: Resume, restart, or quit
-- **Game Over/Victory Screens**: Score display with high score tracking
+- **Polished main menu** - Mission briefing, high score, best combo, and achievement progress
+- **Achievements screen** - Press `A` on the main menu to browse every unlock and its description
+- **In-game HUD** - HP, shield, lives, active timers, boss bar, score, and combo meter
+- **Pause menu** - Resume or return to menu at any time
+- **Game Over/Victory screens** - Stats breakdown with "New High Score" callouts
+- **Achievement toasts** - Instant feedback when you unlock something
 
 ### Progression & Persistence
-- **High Score System**: Persistent high scores saved locally
-- **Settings System**: Configurable volumes and preferences (saved to JSON)
-- **Statistics Tracking**: Games played, bosses defeated, etc.
+- **High score tracking** - Persistent across runs
+- **Statistics** - Games played, victories, bosses defeated, best combo, lasers fired, power-ups collected
+- **Achievements** - 12 unlockable achievements
+- **Settings** - Volume and mute preferences saved to JSON
 
 ## Installation
 
@@ -38,8 +50,9 @@ pip install pygame
 
 # Run the game
 python main.py
-# or
-python enhanced_shooter.py
+
+# Run the classic prototype
+python main.py --classic
 ```
 
 ## Controls
@@ -49,38 +62,45 @@ python enhanced_shooter.py
 | WASD / Arrow Keys | Move spaceship |
 | Space | Shoot |
 | P | Pause/Resume |
-| R | Restart game |
-| O | Quit game |
-| Mouse | Navigate menus |
+| R | Restart mission |
+| M | Mute/Unmute sound |
+| [ / ] | Lower / raise volume |
+| A | Achievements (main menu) |
+| ESC | Pause / Return to menu |
+| Enter | Start / Resume |
+| O | Quit |
+| Mouse | Click menu buttons |
 
 ## Power-Ups
 
 | Power-Up | Effect |
 |---|---|
-| Green Cross (+) | Restore 30 HP |
-| Cyan Shield | Add shield protection |
-| Yellow Triangle | Rapid fire for 10 seconds |
-| Orange Spread | Spread shot for 10 seconds |
-| Red Bomb | Clear all enemy projectiles |
+| Green Cross (+) | Restore 40 HP |
+| Cyan Shield | Add 60 shield points |
+| Yellow Triangle | Rapid fire for ~12 seconds |
+| Orange Spread | 5-way spread shot for ~12 seconds |
+| Purple Bolt | Overdrive (+75% damage) for ~10 seconds |
+| Red Bomb | Clear enemy projectiles & damage boss |
+| Pink Heart | Gain an extra life |
 
 ## Tips
-- Stay mobile to avoid enemy fire
-- Collect power-ups to gain advantages
-- Use spread shot for groups of threats
-- Shields absorb damage before health
-- Bosses get harder with each round
+- Keep moving - boss bullets become dense on later waves
+- Build combos by chaining hits without getting hit
+- Save your shields for the most dangerous barrages
+- Overdrive is devastating on low-health bosses
+- Bombs are great when overwhelmed by enemy fire
 
 ## Technical Details
-
 - **Engine**: Python + Pygame
-- **Save Location**: `saves/save_data.json`
-- **Architecture**: Object-oriented design with classes for game entities
-- **Performance**: Delta-time aware movement, object pooling patterns, efficient collision detection
-- **Code Style**: Follows PEP 8 conventions
+- **Save Location**: `saves/save_data.json` (backup at `saves/save_data.json.bak`)
+- **Audio**: Procedurally synthesised with `pygame.mixer`
+- **Architecture**: Object-oriented design with clean separation of concerns
+- **Performance**: Delta-time aware updates, efficient collision checks, object cleanup
 
-## Troubleshooting
-
-If you encounter audio issues, the game will run without sound. For display issues, try running in windowed mode.
+## Testing
+```bash
+python -m pytest tests/test_basic.py -v
+```
 
 ## Credits
-Original concept enhanced and polished for better gameplay experience.
+Heavily enhanced with new systems, effects, and polish while keeping the core arcade spirit intact.
