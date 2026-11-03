@@ -16,9 +16,45 @@ from pathlib import Path
 WIDTH, HEIGHT = 700, 1000
 FPS = 60
 TITLE = "Dragon Roaster - Space Battle"
-VERSION = "3.0"
+VERSION = "4.0"
 MAX_ROUNDS = 7
 STARTING_LIVES = 3
+
+# ---------------------------------------------------------------------------
+# Difficulty modes
+#
+# boss_hp / boss_damage / boss_delay scale boss stats.  A higher boss_delay
+# means the boss fires *slower*, which is why Cadet gets 1.30 and Ace 0.78.
+# ---------------------------------------------------------------------------
+DIFFICULTIES = {
+    "cadet": {
+        "name": "CADET",
+        "description": "Extra life, softer bosses, relaxed score",
+        "lives": 4,
+        "boss_hp": 0.75,
+        "boss_damage": 0.70,
+        "boss_delay": 1.30,
+        "score": 0.8,
+    },
+    "pilot": {
+        "name": "PILOT",
+        "description": "The intended Dragon Roaster experience",
+        "lives": STARTING_LIVES,
+        "boss_hp": 1.0,
+        "boss_damage": 1.0,
+        "boss_delay": 1.0,
+        "score": 1.0,
+    },
+    "ace": {
+        "name": "ACE",
+        "description": "Brutal bosses, two lives, huge score bonus",
+        "lives": 2,
+        "boss_hp": 1.30,
+        "boss_damage": 1.35,
+        "boss_delay": 0.78,
+        "score": 1.6,
+    },
+}
 
 # ---------------------------------------------------------------------------
 # Colors
@@ -68,6 +104,10 @@ ACHIEVEMENTS = {
         "name": "Living Legend",
         "description": "Reach a score of 10,000.",
     },
+    "score_25000": {
+        "name": "Galaxy Legend",
+        "description": "Reach a score of 25,000.",
+    },
     "combo_10": {
         "name": "Combo Starter",
         "description": "Reach a 10x combo.",
@@ -80,6 +120,18 @@ ACHIEVEMENTS = {
         "name": "Boss Hunter",
         "description": "Defeat 10 bosses across all runs.",
     },
+    "swarm_breaker": {
+        "name": "Swarm Breaker",
+        "description": "Destroy 50 minions across all runs.",
+    },
+    "dash_master": {
+        "name": "Dash Master",
+        "description": "Perform 25 dashes across all runs.",
+    },
+    "fully_loaded": {
+        "name": "Fully Loaded",
+        "description": "Take 5 upgrades in a single run.",
+    },
     "wave_3": {
         "name": "Survivor",
         "description": "Reach wave 3.",
@@ -91,6 +143,10 @@ ACHIEVEMENTS = {
     "untouchable": {
         "name": "Untouchable",
         "description": "Win without losing a life.",
+    },
+    "ace_victory": {
+        "name": "Ace of Aces",
+        "description": "Complete all 7 waves on Ace difficulty.",
     },
     "collector": {
         "name": "Collector",
@@ -112,6 +168,7 @@ DEFAULT_SETTINGS = {
     "fullscreen": False,
     "resolution": [WIDTH, HEIGHT],
     "particle_quality": "high",
+    "difficulty": "pilot",
     "key_bindings": {
         "up": ["w", "UP"],
         "down": ["s", "DOWN"],
@@ -127,9 +184,12 @@ DEFAULT_SETTINGS = {
 DEFAULT_PROGRESSION = {
     "high_score": 0,
     "best_combo": 0,
+    "best_wave": 1,
     "total_enemies_defeated": 0,
+    "total_minions_defeated": 0,
     "total_powerups_collected": 0,
     "total_lasers_fired": 0,
+    "total_dashes": 0,
     "bosses_defeated": 0,
     "games_played": 0,
     "victories": 0,
@@ -139,9 +199,12 @@ DEFAULT_PROGRESSION = {
 _NUMERIC_PROGRESSION_KEYS = (
     "high_score",
     "best_combo",
+    "best_wave",
     "total_enemies_defeated",
+    "total_minions_defeated",
     "total_powerups_collected",
     "total_lasers_fired",
+    "total_dashes",
     "bosses_defeated",
     "games_played",
     "victories",
@@ -228,6 +291,11 @@ class GameConfig:
         self.settings["fullscreen"] = bool(
             self.settings.get("fullscreen", False)
         )
+
+        if self.settings.get("difficulty") not in DIFFICULTIES:
+            self.settings["difficulty"] = "pilot"
+        if self.settings.get("particle_quality") not in ("low", "medium", "high"):
+            self.settings["particle_quality"] = "high"
 
         for key in _NUMERIC_PROGRESSION_KEYS:
             try:

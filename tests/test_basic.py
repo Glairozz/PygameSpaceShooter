@@ -6,6 +6,7 @@ Run with ``python -m pytest`` or ``python tests/test_basic.py``.
 import os
 import sys
 from collections import defaultdict
+from contextlib import contextmanager
 from pathlib import Path
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
@@ -22,10 +23,14 @@ pygame.display.set_mode((1, 1))
 
 from config import (  # noqa: E402
     ACHIEVEMENTS,
+    DEFAULT_PROGRESSION,
+    DEFAULT_SETTINGS,
+    DIFFICULTIES,
     HEIGHT,
     MAX_ROUNDS,
     STARTING_LIVES,
     WIDTH,
+    GameConfig,
     config,
 )
 from enhanced_shooter import (  # noqa: E402
@@ -34,9 +39,12 @@ from enhanced_shooter import (  # noqa: E402
     Enemy,
     FloatingText,
     Laser,
+    Minion,
     Particle,
     PowerUp,
     Spaceship,
+    UPGRADES_BY_KEY,
+    UPGRADE_POOL,
 )
 
 
@@ -45,6 +53,32 @@ def _keys(**pressed):
     return defaultdict(bool, mapping)
 
 
+@contextmanager
+def fresh_game():
+    """Give a test a clean, deterministic game that never touches the save file."""
+    game = EnhancedGame()
+    original_settings = copy.deepcopy(game.config.settings)
+    original_progression = copy.deepcopy(game.config.progression)
+    original_save = game.config.save
+    try:
+        game.config.settings.clear()
+        game.config.settings.update(copy.deepcopy(DEFAULT_SETTINGS))
+        game.config.progression.clear()
+        game.config.progression.update(copy.deepcopy(DEFAULT_PROGRESSION))
+        game.config.save = lambda: None
+        game.achievements_unlocked = set()
+        game.reset_run()
+        game.game_state = "landing"
+        yield game
+    finally:
+        game.config.settings = original_settings
+        game.config.progression = original_progression
+        game.config.save = original_save
+
+
+# ---------------------------------------------------------------------------
+# Player and projectiles
+# ---------------------------------------------------------------------------
 def test_spaceship_movement_bounds():
     ship = Spaceship(0, HEIGHT // 4)
     ship.move(_keys(left=True), dt=1.0)
@@ -84,6 +118,38 @@ def test_spaceship_shoot_and_damage():
     assert ship.take_damage(10) is False  # invulnerability window
 
 
+def test_upgraded_and_critical_lasers():
+    ship = Spaceship(100, 500)
+    ship.last_shot = -10000
+    ship.damage_multiplier = 2.0
+    ship.crit_chance = 1.0
+    lasers = ship.shoot()
+    assert lasers
+    assert all(laser.crit for laser in lasers)
+    assert all(laser.damage >= 52 for laser in lasers)
+    assert all(laser.color == (255, 210, 70) for laser in lasers)
+
+
+def test_dash_mechanic():
+    ship = Spaceship(200, 600)
+    keys = _keys(right=True, up=True)
+    assert ship.start_dash(keys) is True
+    assert ship.dash_time > 0
+    assert ship.invulnerable > 0
+    assert ship.dash_count == 1
+
+    start_x = ship.x
+    ship.move(keys, dt=1.0)
+    assert ship.x > start_x
+
+    # Cooldown blocks a second dash until it expires.
+    assert ship.start_dash(keys) is False
+    ship.dash_time = 0
+    ship.dash_cooldown = 0
+    assert ship.start_dash(_keys()) is True
+    assert ship.dash_direction == (0.0, -1.0)
+
+
 def test_respawn_restores_ship():
     ship = Spaceship(100, 500)
     ship.hp = 0
@@ -102,7 +168,16 @@ def test_laser_creation_and_bounds():
     laser.y = -1000
     assert laser.is_off_screen()
 
+    # Regression: the glow rectangle used to be passed with a broken
+    # signature and raised a TypeError while drawing.
+    surface = pygame.Surface((WIDTH, HEIGHT))
+    laser.y = 100
+    laser.draw(surface)
 
+
+# ---------------------------------------------------------------------------
+# Enemies
+# ---------------------------------------------------------------------------
 def test_enemy_scaling_and_damage():
     first = Enemy(1)
     last = Enemy(MAX_ROUNDS)
@@ -115,6 +190,15 @@ def test_enemy_scaling_and_damage():
     assert first.hp == 0
 
 
+def test_difficulty_scales_bosses():
+    cadet = Enemy(3, "cadet")
+    pilot = Enemy(3, "pilot")
+    ace = Enemy(3, "ace")
+    assert cadet.hp < pilot.hp < ace.hp
+    assert cadet.shoot_delay > pilot.shoot_delay > ace.shoot_delay
+    assert cadet.damage_scale < ace.damage_scale
+
+
 def test_enemy_shoots_every_wave():
     for round_number in range(1, MAX_ROUNDS + 1):
         enemy = Enemy(round_number)
@@ -122,6 +206,25 @@ def test_enemy_shoots_every_wave():
         lasers = enemy.shoot(target_x=WIDTH // 2, target_y=HEIGHT - 200)
         assert lasers, f"wave {round_number} produced no shots"
         assert all(laser.direction == 1 for laser in lasers)
+
+
+def test_minion_behavior():
+    minion = Minion(4)
+    assert minion.hp > 0
+    assert minion.get_rect().width > 0
+
+    start_y = minion.y
+    minion.move()
+    assert minion.y > start_y
+
+    minion.last_shot = -10000
+    shots = minion.shoot()
+    assert shots
+    assert shots[0].direction == 1
+    assert shots[0].damage > 0
+
+    minion.take_damage(100000)
+    assert minion.hp == 0
 
 
 def test_asteroid():
@@ -156,19 +259,35 @@ def test_particle_and_floating_text():
     assert text.update() is True
 
 
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
 def test_config_has_defaults():
     assert isinstance(config.settings, dict)
     assert isinstance(config.progression, dict)
     assert config.progression["high_score"] >= 0
     assert "muted" in config.settings
     assert "victory" in ACHIEVEMENTS
+    assert config.settings["difficulty"] in DIFFICULTIES
+    assert len(ACHIEVEMENTS) >= 16
 
 
+def test_config_sanitizes_invalid_settings():
+    game_config = GameConfig()
+    game_config.settings["difficulty"] = "impossible"
+    game_config.settings["particle_quality"] = "ultra"
+    game_config.settings["sfx_volume"] = 12
+    game_config._sanitize()
+    assert game_config.settings["difficulty"] == "pilot"
+    assert game_config.settings["particle_quality"] == "high"
+    assert game_config.settings["sfx_volume"] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Full game
+# ---------------------------------------------------------------------------
 def test_game_start_life_loss_and_game_over():
-    game = EnhancedGame()
-    config_snapshot = copy.deepcopy(game.config.progression)
-    game.config.save = lambda: None
-    try:
+    with fresh_game() as game:
         game.start_game()
         assert game.game_state == "playing"
         assert game.spaceship.lives == STARTING_LIVES
@@ -187,40 +306,154 @@ def test_game_start_life_loss_and_game_over():
         game.handle_player_death()
         assert game.spaceship.lives == 0
         assert game.game_state == "game_over"
-    finally:
-        game.config.progression = config_snapshot
-        try:
-            del game.config.save
-        except AttributeError:
-            pass
+
+
+def test_difficulty_selection_and_lives():
+    with fresh_game() as game:
+        assert game.set_difficulty("ace") is True
+        assert game.config.settings["difficulty"] == "ace"
+        assert game.difficulty_key == "ace"
+
+        game.start_game()
+        assert game.spaceship.lives == DIFFICULTIES["ace"]["lives"]
+        assert game.enemy.difficulty == "ace"
+        assert game.score_scale == DIFFICULTIES["ace"]["score"]
+
+        assert game.set_difficulty("nope") is False
+
+        game.game_state = "landing"
+        game._handle_key(pygame.K_1)
+        assert game.difficulty_key == "cadet"
+
+
+def test_upgrade_selection_applies():
+    with fresh_game() as game:
+        game.start_game()
+        ship = game.spaceship
+
+        game.game_state = "upgrade"
+        game.upgrade_choices = [UPGRADES_BY_KEY["damage"]]
+        before_damage = ship.damage_multiplier
+        assert game.choose_upgrade(0) is True
+        assert ship.damage_multiplier > before_damage
+        assert game.upgrades["damage"] == 1
+        assert game.run_upgrades == 1
+        assert game.round == 2
+        assert game.game_state == "playing"
+
+        game.game_state = "upgrade"
+        game.upgrade_choices = [UPGRADES_BY_KEY["hull"]]
+        before_hp = ship.max_hp
+        game.choose_upgrade(0)
+        assert ship.max_hp == before_hp + 25
+
+        game.game_state = "upgrade"
+        game.upgrade_choices = [UPGRADES_BY_KEY["shield"]]
+        before_shield = ship.shield_max
+        game.choose_upgrade(0)
+        assert ship.shield_max == before_shield + 40
+
+        game.game_state = "upgrade"
+        game.upgrade_choices = [UPGRADES_BY_KEY["life"]]
+        before_lives = ship.lives
+        game.choose_upgrade(0)
+        assert ship.lives == before_lives + 1
+
+        # Invalid selections are rejected.
+        assert game.choose_upgrade(0) is False
+
+
+def test_upgrade_pool_exhaustion_gives_repair():
+    with fresh_game() as game:
+        game.upgrades = {
+            upgrade["key"]: upgrade["max_level"] for upgrade in UPGRADE_POOL
+        }
+        choices = game.generate_upgrades()
+        assert len(choices) == 1
+        assert choices[0]["key"] == "repair"
+
+
+def test_minion_defeat_scoring():
+    with fresh_game() as game:
+        game.start_game()
+        minion = Minion(2)
+        game.minions = [minion]
+        before_score = game.score
+        before_combo = game.combo
+
+        game.on_minion_defeated(minion)
+        assert minion not in game.minions
+        assert game.run_minions == 1
+        assert game.score > before_score
+        assert game.combo > before_combo
+        assert game.config.progression["total_minions_defeated"] == 1
+
+
+def test_dash_key_and_counter():
+    with fresh_game() as game:
+        game.start_game()
+        before = game.config.progression["total_dashes"]
+        assert game._handle_key(pygame.K_x) is True
+        assert game.run_dashes == 1
+        assert game.config.progression["total_dashes"] == before + 1
+        assert game.spaceship.dash_cooldown > 0
+
+
+def test_particle_quality_scaling():
+    with fresh_game() as game:
+        game.config.settings["particle_quality"] = "low"
+        game.particles.clear()
+        game.add_particles(10, 10, (255, 0, 0), 100)
+        low_count = len(game.particles)
+
+        game.config.settings["particle_quality"] = "high"
+        game.particles.clear()
+        game.add_particles(10, 10, (255, 0, 0), 100)
+        high_count = len(game.particles)
+
+        assert 0 < low_count < high_count
+
+
+def test_new_achievement_conditions():
+    with fresh_game() as game:
+        game.config.settings["difficulty"] = "ace"
+        game.start_game()
+        game.config.progression["total_minions_defeated"] = 50
+        game.config.progression["total_dashes"] = 25
+        game.run_upgrades = 5
+        game.game_state = "victory"
+        game.check_achievements()
+
+        for key in (
+            "swarm_breaker",
+            "dash_master",
+            "fully_loaded",
+            "ace_victory",
+        ):
+            assert key in game.achievements_unlocked
 
 
 def test_full_campaign_reaches_victory():
-    game = EnhancedGame()
-    config_snapshot = copy.deepcopy(game.config.progression)
-    game.config.save = lambda: None
-    try:
+    with fresh_game() as game:
         game.start_game()
         for expected_round in range(1, MAX_ROUNDS + 1):
             assert game.round == expected_round
             assert game.game_state == "playing"
             game.enemy.hp = 0
             game.update()
+
+            if expected_round < MAX_ROUNDS:
+                assert game.game_state == "upgrade"
+                assert game.upgrade_choices
+                assert game.choose_upgrade(0) is True
+                assert game.game_state == "playing"
+
         assert game.game_state == "victory"
         assert "victory" in game.achievements_unlocked
-    finally:
-        game.config.progression = config_snapshot
-        try:
-            del game.config.save
-        except AttributeError:
-            pass
 
 
 def test_game_smoke_render_and_update():
-    game = EnhancedGame()
-    config_snapshot = copy.deepcopy(game.config.progression)
-    game.config.save = lambda: None
-    try:
+    with fresh_game() as game:
         game.start_game()
         for power_type in (
             "health",
@@ -234,10 +467,17 @@ def test_game_smoke_render_and_update():
             game.apply_powerup(power_type)
         game.add_toast("TEST TOAST", (255, 255, 0), 30)
         game.show_banner("TEST", "BANNER", 30)
+        game.minions.append(Minion(3))
+        game.minions.append(Minion(5))
 
         for _ in range(90):
             game.update()
             game.draw()
+
+        # Upgrade overlay
+        game.game_state = "upgrade"
+        game.upgrade_choices = game.generate_upgrades()
+        game.draw()
 
         game.game_state = "paused"
         game.draw()
@@ -250,12 +490,10 @@ def test_game_smoke_render_and_update():
         game.draw()
         game.show_achievements = True
         game.draw()
-    finally:
-        game.config.progression = config_snapshot
-        try:
-            del game.config.save
-        except AttributeError:
-            pass
+        game.show_achievements = False
+        game.show_stats = True
+        game.draw()
+        game.show_stats = False
 
 
 if __name__ == "__main__":

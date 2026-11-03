@@ -169,6 +169,15 @@ class SoundManager:
         self.sounds["click"] = self._render(
             0.05, sweep(900, 700, "square"), gain=0.18
         )
+        self.sounds["dash"] = self._render(
+            0.16, sweep(280, 1250, "saw"), gain=0.22
+        )
+        self.sounds["minion_death"] = self._render(
+            0.14, sweep(700, 140, "square"), gain=0.20
+        )
+        self.sounds["upgrade"] = self._render(
+            0.5, arpeggio([392, 523, 659, 784, 1046]), gain=0.33
+        )
 
     # -- playback -----------------------------------------------------------
     @property

@@ -97,6 +97,74 @@ BOSS_DATA = (
     },
 )
 
+# ---------------------------------------------------------------------------
+# Between-wave upgrades (roguelite style)
+# ---------------------------------------------------------------------------
+UPGRADE_POOL = (
+    {
+        "key": "damage",
+        "name": "PLASMA COILS",
+        "desc": "+15% laser damage",
+        "color": CYAN,
+        "max_level": 5,
+    },
+    {
+        "key": "firerate",
+        "name": "OVERCLOCKED CORE",
+        "desc": "-12% fire delay",
+        "color": YELLOW,
+        "max_level": 4,
+    },
+    {
+        "key": "speed",
+        "name": "ION THRUSTERS",
+        "desc": "+10% move speed",
+        "color": LIGHT_BLUE,
+        "max_level": 4,
+    },
+    {
+        "key": "hull",
+        "name": "REINFORCED HULL",
+        "desc": "+25 max HP and heal",
+        "color": GREEN,
+        "max_level": 4,
+    },
+    {
+        "key": "shield",
+        "name": "AEGIS MATRIX",
+        "desc": "+40 shield capacity",
+        "color": TEAL,
+        "max_level": 3,
+    },
+    {
+        "key": "crit",
+        "name": "TARGETING AI",
+        "desc": "+8% critical chance",
+        "color": GOLD,
+        "max_level": 3,
+    },
+    {
+        "key": "dash",
+        "name": "PHASE DRIVE",
+        "desc": "-20% dash cooldown",
+        "color": MAGENTA,
+        "max_level": 2,
+    },
+    {
+        "key": "life",
+        "name": "SPARE HULL",
+        "desc": "+1 extra life",
+        "color": PINK,
+        "max_level": 1,
+    },
+)
+UPGRADES_BY_KEY = {upgrade["key"]: upgrade for upgrade in UPGRADE_POOL}
+
+PARTICLE_QUALITY_SCALE = {"low": 0.35, "medium": 0.65, "high": 1.0}
+
+COMBO_MILESTONES = (10, 25, 50, 100)
+
+
 
 def clamp(value, low, high):
     return max(low, min(high, value))
@@ -228,23 +296,39 @@ class Nebula:
         self.color = random.choice([(80, 0, 120), (0, 50, 100), (100, 0, 80)])
         self.speed = random.uniform(0.15, 0.35)
         self.alpha = random.randint(20, 40)
+        self._surface = None
+        self._cache = None
+
+    def _respawn(self):
+        self.x = random.randint(-200, WIDTH)
+        self.size = random.randint(150, 300)
+        self.color = random.choice([(80, 0, 120), (0, 50, 100), (100, 0, 80)])
+        self.alpha = random.randint(20, 40)
+        self._surface = None
+        self._cache = None
 
     def update(self, dt=1.0 / FPS):
         self.y += self.speed * dt * 60
         if self.y > HEIGHT:
+            self._respawn()
             self.y = -self.size
-            self.x = random.randint(-200, WIDTH)
-            self.size = random.randint(150, 300)
-            self.color = random.choice([(80, 0, 120), (0, 50, 100), (100, 0, 80)])
-            self.alpha = random.randint(20, 40)
 
     def draw(self, screen):
-        surface = pygame.Surface((self.size, self.size), pygame.SRCALPHA)
-        color = (*self.color, self.alpha)
-        pygame.draw.circle(
-            surface, color, (self.size // 2, self.size // 2), self.size // 2
-        )
-        screen.blit(surface, (int(self.x), int(self.y)))
+        # Rebuild the soft nebula surface only when its look changes.  This
+        # removes three large per-frame surface allocations from the hot path.
+        cache = (self.size, self.color, self.alpha)
+        if self._surface is None or self._cache != cache:
+            self._surface = pygame.Surface(
+                (self.size, self.size), pygame.SRCALPHA
+            )
+            pygame.draw.circle(
+                self._surface,
+                (*self.color, self.alpha),
+                (self.size // 2, self.size // 2),
+                self.size // 2,
+            )
+            self._cache = cache
+        screen.blit(self._surface, (int(self.x), int(self.y)))
 
 
 # ---------------------------------------------------------------------------
@@ -383,8 +467,32 @@ class Spaceship:
         self.thruster_frame = 0
         self.hit_flash = 0
 
+        # Run upgrades
+        self.damage_multiplier = 1.0
+        self.crit_chance = 0.0
+
+        # Dash / phase drive
+        self.dash_time = 0
+        self.dash_cooldown = 0
+        self.dash_cooldown_max = 105
+        self.dash_direction = (0.0, -1.0)
+        self.dash_count = 0
+
     def move(self, keys, dt=1.0):
         speed = self.speed * dt * 60
+
+        if self.dash_time > 0:
+            dx, dy = self.dash_direction
+            self.x = max(
+                0, min(WIDTH - self.width, self.x + dx * speed * 2.8)
+            )
+            self.y = max(
+                HEIGHT // 4,
+                min(HEIGHT - self.height - 35, self.y + dy * speed * 2.8),
+            )
+            self.thruster_frame += 1
+            return
+
         if keys[pygame.K_LEFT] or keys[pygame.K_a]:
             self.x = max(0, self.x - speed)
         if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
@@ -394,6 +502,48 @@ class Spaceship:
         if keys[pygame.K_DOWN] or keys[pygame.K_s]:
             self.y = min(HEIGHT - self.height - 35, self.y + speed)
         self.thruster_frame += 1
+
+    def start_dash(self, keys):
+        """Begin a short invulnerable burst. Returns True when it activates."""
+        if self.dash_cooldown > 0 or self.dash_time > 0:
+            return False
+
+        dx = 0
+        dy = 0
+        if keys[pygame.K_LEFT] or keys[pygame.K_a]:
+            dx -= 1
+        if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
+            dx += 1
+        if keys[pygame.K_UP] or keys[pygame.K_w]:
+            dy -= 1
+        if keys[pygame.K_DOWN] or keys[pygame.K_s]:
+            dy += 1
+        if dx == 0 and dy == 0:
+            dy = -1
+
+        length = math.hypot(dx, dy) or 1.0
+        self.dash_direction = (dx / length, dy / length)
+        self.dash_time = 11
+        self.dash_cooldown = self.dash_cooldown_max
+        self.invulnerable = max(self.invulnerable, 15)
+        self.dash_count += 1
+        return True
+
+    def _make_laser(self, x, y, color, angle=0, base_damage=26):
+        damage = int(base_damage * self.damage_multiplier)
+        critical = random.random() < self.crit_chance
+        if critical:
+            damage = int(damage * 2)
+        laser = Laser(
+            x,
+            y,
+            -1,
+            GOLD if critical else color,
+            angle=angle,
+            damage=damage,
+        )
+        laser.crit = critical
+        return laser
 
     def shoot(self):
         current_time = pygame.time.get_ticks()
@@ -406,38 +556,53 @@ class Spaceship:
         if self.spread_shot > 0:
             lasers.extend(
                 [
-                    Laser(center_x, self.y, -1, CYAN, damage=24),
-                    Laser(center_x - 18, self.y + 8, -1, CYAN, angle=-8, damage=24),
-                    Laser(center_x + 18, self.y + 8, -1, CYAN, angle=8, damage=24),
-                    Laser(
+                    self._make_laser(center_x, self.y, CYAN, base_damage=24),
+                    self._make_laser(
+                        center_x - 18, self.y + 8, CYAN, angle=-8, base_damage=24
+                    ),
+                    self._make_laser(
+                        center_x + 18, self.y + 8, CYAN, angle=8, base_damage=24
+                    ),
+                    self._make_laser(
                         self.x + 15,
                         self.y + 12,
-                        -1,
                         (100, 255, 255),
                         angle=-4,
-                        damage=24,
+                        base_damage=24,
                     ),
-                    Laser(
+                    self._make_laser(
                         self.x + self.width - 15,
                         self.y + 12,
-                        -1,
                         (100, 255, 255),
                         angle=4,
-                        damage=24,
+                        base_damage=24,
                     ),
                 ]
             )
         else:
-            lasers.append(Laser(center_x, self.y, -1, CYAN))
+            lasers.append(self._make_laser(center_x, self.y, CYAN))
             if self.rapid_fire > 0:
-                lasers.append(Laser(self.x + 12, self.y + 5, -1, (150, 255, 255)))
                 lasers.append(
-                    Laser(self.x + self.width - 12, self.y + 5, -1, (150, 255, 255))
+                    self._make_laser(
+                        self.x + 12,
+                        self.y + 5,
+                        (150, 255, 255),
+                        base_damage=20,
+                    )
+                )
+                lasers.append(
+                    self._make_laser(
+                        self.x + self.width - 12,
+                        self.y + 5,
+                        (150, 255, 255),
+                        base_damage=20,
+                    )
                 )
         if self.overdrive > 0:
             for laser in lasers:
                 laser.damage = int(laser.damage * 1.75)
-                laser.color = MAGENTA
+                if not laser.crit:
+                    laser.color = MAGENTA
         return lasers
 
     def update(self):
@@ -451,6 +616,10 @@ class Spaceship:
             self.invulnerable -= 1
         if self.hit_flash > 0:
             self.hit_flash -= 1
+        if self.dash_time > 0:
+            self.dash_time -= 1
+        if self.dash_cooldown > 0:
+            self.dash_cooldown -= 1
 
     def take_damage(self, damage):
         if self.invulnerable > 0:
@@ -479,8 +648,31 @@ class Spaceship:
         self.y = HEIGHT - 190
 
     def draw(self, screen):
-        if self.invulnerable > 0 and (self.invulnerable // 4) % 2 == 0:
+        if (
+            self.invulnerable > 0
+            and (self.invulnerable // 4) % 2 == 0
+            and self.dash_time <= 0
+        ):
             return
+
+        if self.dash_time > 0:
+            for index in range(1, 4):
+                ghost_x = self.x - self.dash_direction[0] * index * 16
+                ghost_y = self.y - self.dash_direction[1] * index * 16
+                ghost = pygame.Surface(
+                    (self.width, self.height), pygame.SRCALPHA
+                )
+                pygame.draw.polygon(
+                    ghost,
+                    (*CYAN, max(25, 110 - index * 28)),
+                    [
+                        (self.width // 2, 0),
+                        (0, self.height),
+                        (self.width // 2, self.height - 12),
+                        (self.width, self.height),
+                    ],
+                )
+                screen.blit(ghost, (ghost_x, ghost_y))
 
         if self.shield > 0:
             shield_surface = pygame.Surface(
@@ -558,6 +750,7 @@ class Laser:
         self.angle = angle
         self.damage = damage if damage is not None else (26 if direction == -1 else 18)
         self.trail = []
+        self.crit = False
 
     def move(self):
         self.trail.append((self.x, self.y))
@@ -581,7 +774,12 @@ class Laser:
         )
         if self.direction == -1:
             glow = pygame.Surface((self.width + 10, self.height + 4), pygame.SRCALPHA)
-            pygame.draw.rect(glow, (*WHITE, 40), (3, 2), self.width + 4, self.height)
+            pygame.draw.rect(
+                glow,
+                (*WHITE, 40),
+                (3, 2, self.width + 4, self.height),
+                border_radius=2,
+            )
             screen.blit(glow, (self.x - 5, self.y - 2))
         else:
             for index in range(2):
@@ -608,8 +806,11 @@ class Laser:
 # Enemies
 # ---------------------------------------------------------------------------
 class Enemy:
-    def __init__(self, round_number):
+    def __init__(self, round_number, difficulty="pilot"):
         data = BOSS_DATA[(round_number - 1) % len(BOSS_DATA)]
+        profile = DIFFICULTIES.get(difficulty, DIFFICULTIES["pilot"])
+        self.difficulty = difficulty
+        self.damage_scale = profile["boss_damage"]
         self.round_number = round_number
         self.name = data["name"]
         self.color = data["color"]
@@ -619,10 +820,11 @@ class Enemy:
         self.speed = data["speed"]
         self.x = random.randint(40, WIDTH - self.width - 40)
         self.y = 55
-        self.hp = 850 + round_number * 300
+        self.hp = int((850 + round_number * 300) * profile["boss_hp"])
         self.max_hp = self.hp
         self.last_shot = 0
-        self.shoot_delay = max(400, 1050 - round_number * 70)
+        base_delay = max(400, 1050 - round_number * 70)
+        self.shoot_delay = max(280, int(base_delay * profile["boss_delay"]))
         self.move_direction = random.choice([-1, 1])
         self.move_timer = 0
         self.pattern_timer = random.randint(0, 120)
@@ -673,7 +875,7 @@ class Enemy:
         lasers = []
         center_x = self.x + self.width // 2
         bottom = self.y + self.height
-        damage = 12 + self.round_number * 2
+        damage = int((12 + self.round_number * 2) * self.damage_scale)
         aimed = self._aim_angle(target_x, target_y)
         round_number = self.round_number
 
@@ -797,6 +999,112 @@ class Enemy:
         return pygame.Rect(self.x + 6, self.y + 6, self.width - 12, self.height - 16)
 
 
+class Minion:
+    """Small swarm fighter that escorts the boss."""
+
+    def __init__(self, round_number, difficulty="pilot"):
+        profile = DIFFICULTIES.get(difficulty, DIFFICULTIES["pilot"])
+        self.round_number = round_number
+        self.damage_scale = profile["boss_damage"]
+        self.width = 34
+        self.height = 28
+        self.x = random.randint(30, WIDTH - self.width - 30)
+        self.y = -self.height
+        self.hp = 24 + round_number * 9
+        self.max_hp = self.hp
+        self.speed = random.uniform(1.5, 2.4) + round_number * 0.1
+        self.drift = random.uniform(-1.3, 1.3)
+        self.timer = random.randint(0, 180)
+        self.shoot_delay = random.randint(1100, 2000)
+        self.last_shot = pygame.time.get_ticks() - random.randint(0, 1200)
+        self.flash = 0
+        self.color = random.choice(
+            [(255, 120, 90), (120, 220, 255), (230, 120, 255)]
+        )
+
+    def move(self):
+        self.timer += 1
+        self.y += self.speed
+        self.x += math.sin(self.timer * 0.05) * 0.9 + self.drift * 0.2
+        self.x = max(
+            8, min(WIDTH - self.width - 8, self.x)
+        )
+        if self.flash > 0:
+            self.flash -= 1
+
+    def shoot(self):
+        current_time = pygame.time.get_ticks()
+        if current_time - self.last_shot <= self.shoot_delay:
+            return []
+        self.last_shot = current_time
+        damage = max(6, int((7 + self.round_number) * self.damage_scale))
+        return [
+            Laser(
+                self.x + self.width // 2,
+                self.y + self.height,
+                1,
+                self.color,
+                damage=damage,
+            )
+        ]
+
+    def take_damage(self, damage):
+        self.hp -= max(0, damage)
+        if self.hp < 0:
+            self.hp = 0
+        self.flash = 4
+        return self.hp <= 0
+
+    def draw(self, screen):
+        body = WHITE if self.flash > 0 else self.color
+        center_x = self.x + self.width // 2
+        top = self.y
+        bottom = self.y + self.height
+        pygame.draw.polygon(
+            screen,
+            body,
+            [
+                (center_x, bottom),
+                (self.x, top + self.height * 0.25),
+                (center_x, top),
+                (self.x + self.width, top + self.height * 0.25),
+            ],
+        )
+        pygame.draw.polygon(
+            screen,
+            tuple(max(20, channel // 2) for channel in self.color),
+            [
+                (self.x, top + self.height * 0.34),
+                (self.x - 8, top + self.height * 0.5),
+                (self.x + self.width * 0.3, bottom - 4),
+            ],
+        )
+        pygame.draw.polygon(
+            screen,
+            tuple(max(20, channel // 2) for channel in self.color),
+            [
+                (self.x + self.width, top + self.height * 0.34),
+                (self.x + self.width + 8, top + self.height * 0.5),
+                (self.x + self.width * 0.7, bottom - 4),
+            ],
+        )
+        pygame.draw.circle(
+            screen, WHITE, (center_x, int(top + self.height * 0.38)), 3
+        )
+        if (self.timer // 4) % 2 == 0:
+            pygame.draw.circle(
+                screen, ORANGE, (center_x, int(bottom + 2)), 3
+            )
+
+    def get_rect(self):
+        return pygame.Rect(
+            self.x + 5, self.y + 4, self.width - 10, self.height - 8
+        )
+
+    def is_off_screen(self):
+        return self.y > HEIGHT + 50
+
+
 class Asteroid:
     def __init__(self, x, y):
         self.x = x
@@ -875,7 +1183,8 @@ class Asteroid:
 class EnhancedGame:
     def __init__(self):
         self.config = config
-        self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
+        self.fullscreen = bool(self.config.settings.get("fullscreen", False))
+        self.screen = self._create_screen()
         pygame.display.set_caption(f"{TITLE} - v{VERSION}")
         self._set_window_icon()
         self.clock = pygame.time.Clock()
@@ -904,14 +1213,57 @@ class EnhancedGame:
         self.stars = [Star(index % 3) for index in range(170)]
         self.nebulas = [Nebula() for _ in range(3)]
         self.shake_offset = (0, 0)
-        self.start_button = pygame.Rect(WIDTH // 2 - 160, 710, 320, 74)
+        self.start_button = pygame.Rect(WIDTH // 2 - 160, 700, 320, 72)
+        self.difficulty_buttons = {}
         self.pause_buttons = {}
         self.end_buttons = {}
+        self.upgrade_buttons = {}
         self.show_achievements = False
+        self.show_stats = False
 
         self.reset_run()
         self.game_state = "landing"
         print(f"Dragon Roaster v{VERSION} initialized!")
+
+    @staticmethod
+    def _create_screen(fullscreen=False):
+        try:
+            if fullscreen and hasattr(pygame, "SCALED"):
+                return pygame.display.set_mode(
+                    (WIDTH, HEIGHT), pygame.FULLSCREEN | pygame.SCALED
+                )
+            if fullscreen:
+                return pygame.display.set_mode((WIDTH, HEIGHT), pygame.FULLSCREEN)
+        except pygame.error:
+            pass
+        return pygame.display.set_mode((WIDTH, HEIGHT))
+
+    def _toggle_fullscreen(self):
+        self.fullscreen = not self.fullscreen
+        self.screen = self._create_screen(self.fullscreen)
+        self.world = pygame.Surface((WIDTH, HEIGHT)).convert()
+        self.config.settings["fullscreen"] = self.fullscreen
+        self.config.save()
+        self.add_toast(
+            "FULLSCREEN ON" if self.fullscreen else "FULLSCREEN OFF",
+            CYAN,
+            90,
+        )
+
+    @property
+    def difficulty_key(self):
+        key = self.config.settings.get("difficulty", "pilot")
+        return key if key in DIFFICULTIES else "pilot"
+
+    @property
+    def difficulty(self):
+        return DIFFICULTIES[self.difficulty_key]
+
+    @property
+    def particle_scale(self):
+        quality = self.config.settings.get("particle_quality", "high")
+        return PARTICLE_QUALITY_SCALE.get(quality, 1.0)
+
 
     @staticmethod
     def _set_window_icon():
@@ -931,26 +1283,32 @@ class EnhancedGame:
     # -- lifecycle ----------------------------------------------------------
     def reset_run(self):
         self.spaceship = Spaceship(WIDTH // 2 - 32, HEIGHT - 190)
+        self.spaceship.lives = self.difficulty["lives"]
         self.player_lasers = []
         self.enemy_lasers = []
         self.asteroids = []
+        self.minions = []
         self.powerups = []
         self.particles = []
         self.floating_texts = []
         self.toasts = []
 
         self.round = 1
-        self.enemy = Enemy(self.round)
+        self.enemy = Enemy(self.round, self.difficulty_key)
         self.score = 0
+        self.score_scale = self.difficulty["score"]
         self.combo = 0
         self.combo_timer = 0
         self.max_combo = 0
         self.asteroid_spawn_timer = 70
         self.powerup_spawn_timer = 240
+        self.minion_spawn_timer = 150
         self.screen_shake = 0
         self.shake_offset = (0, 0)
         self.run_powerups = 0
         self.run_lasers = 0
+        self.run_minions = 0
+        self.run_dashes = 0
         self.lives_lost = 0
         self.new_high_score = False
         self.game_over_reason = ""
@@ -959,7 +1317,12 @@ class EnhancedGame:
         self.banner_timer = 0
         self.banner_color = GOLD
         self.end_buttons = {}
+        self.upgrade_buttons = {}
+        self.upgrade_choices = []
+        self.upgrades = {}
+        self.run_upgrades = 0
         self.show_achievements = False
+        self.show_stats = False
 
     def reset_game(self):
         self.reset_run()
@@ -977,8 +1340,38 @@ class EnhancedGame:
         self.game_state = "landing"
         self.audio.play("click")
 
+    def set_difficulty(self, key):
+        if key not in DIFFICULTIES:
+            return False
+        self.config.settings["difficulty"] = key
+        self.config.save()
+        self.spaceship.lives = self.difficulty["lives"]
+        self.enemy = Enemy(self.round, self.difficulty_key)
+        self.score_scale = self.difficulty["score"]
+        self.audio.play("click")
+        self.add_toast(f"DIFFICULTY: {self.difficulty['name']}", CYAN, 90)
+        return True
+
+    def cycle_particle_quality(self):
+        order = ["low", "medium", "high"]
+        current = self.config.settings.get("particle_quality", "high")
+        index = order.index(current) if current in order else len(order) - 1
+        quality = order[(index + 1) % len(order)]
+        self.config.settings["particle_quality"] = quality
+        self.config.save()
+        self.audio.play("click")
+        self.add_toast(f"PARTICLES: {quality.upper()}", CYAN, 90)
+
+    def toggle_mute(self):
+        muted = self.audio.toggle_mute()
+        self.config.settings["muted"] = muted
+        self.config.save()
+        self.add_toast("SOUND OFF" if muted else "SOUND ON", CYAN, 100)
+        return muted
+
     # -- feedback helpers ---------------------------------------------------
     def add_particles(self, x, y, color, count=20, shape="circle", speed=8):
+        count = max(1, int(count * self.particle_scale))
         for _ in range(count):
             self.particles.append(
                 Particle(
@@ -1012,15 +1405,19 @@ class EnhancedGame:
         return 1 + min(5, self.combo // 5)
 
     def register_hit(self):
+        previous = self.combo
         self.combo += 1
         self.combo_timer = 90
         self.max_combo = max(self.max_combo, self.combo)
         best = self.config.progression.get("best_combo", 0)
         if self.combo > best:
             self.config.progression["best_combo"] = self.combo
+        if self.combo in COMBO_MILESTONES and previous < self.combo:
+            self.add_toast(f"COMBO x{self.combo}!", ORANGE, 90)
+            self.audio.play("powerup")
 
     def add_score(self, amount, x=None, y=None, color=GOLD, show_text=True):
-        gained = int(amount * self.score_multiplier)
+        gained = int(amount * self.score_multiplier * self.score_scale)
         self.score += gained
         if show_text and x is not None:
             self.add_floating_text(x, y if y is not None else 0, f"+{gained}", color)
@@ -1042,6 +1439,15 @@ class EnhancedGame:
         x = random.randint(35, WIDTH - 75)
         self.powerups.append(PowerUp(x, -40))
         self.powerup_spawn_timer = random.randint(420, 700)
+
+    def spawn_minion(self):
+        if self.minion_spawn_timer > 0:
+            self.minion_spawn_timer -= 1
+            return
+        if len(self.minions) < 7:
+            self.minions.append(Minion(self.round, self.difficulty_key))
+        base = max(95, 250 - self.round * 20)
+        self.minion_spawn_timer = random.randint(int(base * 0.7), base)
 
     # -- update -------------------------------------------------------------
     def update(self):
@@ -1075,6 +1481,14 @@ class EnhancedGame:
         keys = pygame.key.get_pressed()
         self.spaceship.move(keys, dt)
         self.spaceship.update()
+        if self.spaceship.dash_time > 0:
+            self.add_particles(
+                self.spaceship.x + self.spaceship.width // 2,
+                self.spaceship.y + self.spaceship.height // 2,
+                CYAN,
+                2,
+                speed=3,
+            )
         if keys[pygame.K_SPACE]:
             self.fire()
 
@@ -1085,6 +1499,7 @@ class EnhancedGame:
 
         self.spawn_asteroid()
         self.spawn_powerup()
+        self.spawn_minion()
         self.update_projectiles()
         self.update_pickups()
         self.update_effects()
@@ -1097,6 +1512,15 @@ class EnhancedGame:
             if enemy_lasers:
                 self.enemy_lasers.extend(enemy_lasers)
                 self.audio.play("enemy_shoot")
+
+        for minion in self.minions[:]:
+            minion.move()
+            shots = minion.shoot()
+            if shots:
+                self.enemy_lasers.extend(shots)
+        self.minions = [
+            minion for minion in self.minions if not minion.is_off_screen()
+        ]
 
         self.handle_collisions()
 
@@ -1173,10 +1597,30 @@ class EnhancedGame:
                 and laser.get_rect().colliderect(self.enemy.get_rect())
             ):
                 self.enemy.take_damage(laser.damage)
-                self.add_particles(laser.x, laser.y, CYAN, 8)
+                if laser.crit:
+                    self.add_particles(laser.x, laser.y, GOLD, 16)
+                    self.add_floating_text(laser.x, laser.y - 8, "CRIT!", GOLD)
+                else:
+                    self.add_particles(laser.x, laser.y, CYAN, 8)
                 self.register_hit()
-                self.score += 2 * self.score_multiplier
+                self.score += int(2 * self.score_multiplier * self.score_scale)
                 self.audio.play("hit")
+                try:
+                    self.player_lasers.remove(laser)
+                except ValueError:
+                    pass
+                continue
+
+            hit_minion = None
+            for minion in self.minions[:]:
+                if laser.get_rect().colliderect(minion.get_rect()):
+                    hit_minion = minion
+                    break
+            if hit_minion is not None:
+                hit_minion.take_damage(laser.damage)
+                self.add_particles(laser.x, laser.y, hit_minion.color, 7)
+                if hit_minion.hp <= 0:
+                    self.on_minion_defeated(hit_minion)
                 try:
                     self.player_lasers.remove(laser)
                 except ValueError:
@@ -1247,6 +1691,26 @@ class EnhancedGame:
                 except ValueError:
                     pass
 
+        for minion in self.minions[:]:
+            if ship_rect.colliderect(minion.get_rect()):
+                if self.spaceship.invulnerable == 0 and self.spaceship.take_damage(
+                    int((14 + self.round * 2) * self.difficulty["boss_damage"])
+                ):
+                    self.add_particles(
+                        minion.x + minion.width // 2,
+                        minion.y + minion.height // 2,
+                        minion.color,
+                        18,
+                    )
+                    self.add_screen_shake(10)
+                    self.combo = 0
+                    self.combo_timer = 0
+                    self.audio.play("hit")
+                try:
+                    self.minions.remove(minion)
+                except ValueError:
+                    pass
+
         for powerup in self.powerups[:]:
             if ship_rect.colliderect(powerup.get_rect()):
                 self.apply_powerup(powerup.type)
@@ -1255,6 +1719,20 @@ class EnhancedGame:
                     self.powerups.remove(powerup)
                 except ValueError:
                     pass
+
+    def on_minion_defeated(self, minion):
+        if minion in self.minions:
+            self.minions.remove(minion)
+        center_x = minion.x + minion.width // 2
+        center_y = minion.y + minion.height // 2
+        self.run_minions += 1
+        self.config.progression["total_minions_defeated"] = (
+            self.config.progression.get("total_minions_defeated", 0) + 1
+        )
+        self.register_hit()
+        self.add_score(65 + self.round * 6, center_x, center_y, minion.color)
+        self.add_particles(center_x, center_y, minion.color, 16)
+        self.audio.play("minion_death")
 
     def apply_powerup(self, power_type):
         ship = self.spaceship
@@ -1272,6 +1750,10 @@ class EnhancedGame:
             self.enemy_lasers.clear()
             if self.enemy and self.enemy.hp > 0:
                 self.enemy.take_damage(150)
+            for minion in self.minions[:]:
+                minion.take_damage(150)
+                if minion.hp <= 0:
+                    self.on_minion_defeated(minion)
             for _ in range(70):
                 self.add_particles(
                     random.randint(0, WIDTH),
@@ -1344,18 +1826,100 @@ class EnhancedGame:
         if self.round >= MAX_ROUNDS:
             self.end_run(True, "All bosses defeated")
         else:
-            self.next_round()
+            self.begin_upgrade()
+
+    def generate_upgrades(self):
+        available = [
+            upgrade
+            for upgrade in UPGRADE_POOL
+            if self.upgrades.get(upgrade["key"], 0) < upgrade["max_level"]
+        ]
+        random.shuffle(available)
+        choices = available[:3]
+        if not choices:
+            choices = [
+                {
+                    "key": "repair",
+                    "name": "FIELD REPAIR",
+                    "desc": "Restore 40 HP",
+                    "color": GREEN,
+                    "max_level": 99,
+                }
+            ]
+        return choices
+
+    def begin_upgrade(self):
+        self.game_state = "upgrade"
+        self.upgrade_choices = self.generate_upgrades()
+        self.upgrade_buttons = {}
+        self.enemy_lasers.clear()
+        self.audio.play("upgrade")
+
+    def choose_upgrade(self, index):
+        if self.game_state != "upgrade":
+            return False
+        if not 0 <= index < len(self.upgrade_choices):
+            return False
+
+        choice = self.upgrade_choices[index]
+        key = choice["key"]
+        ship = self.spaceship
+        self.upgrades[key] = self.upgrades.get(key, 0) + 1
+
+        if key == "damage":
+            ship.damage_multiplier += 0.15
+        elif key == "firerate":
+            ship.shoot_delay = max(60, int(ship.shoot_delay * 0.88))
+        elif key == "speed":
+            ship.speed *= 1.10
+        elif key == "hull":
+            ship.max_hp += 25
+            ship.hp = min(ship.max_hp, ship.hp + 25)
+        elif key == "shield":
+            ship.shield_max += 40
+            ship.shield = min(ship.shield_max, ship.shield + 40)
+        elif key == "crit":
+            ship.crit_chance = min(0.75, ship.crit_chance + 0.08)
+        elif key == "dash":
+            ship.dash_cooldown_max = max(
+                42, int(ship.dash_cooldown_max * 0.80)
+            )
+            ship.dash_cooldown = min(ship.dash_cooldown, ship.dash_cooldown_max)
+        elif key == "life":
+            ship.lives += 1
+        elif key == "repair":
+            ship.hp = min(ship.max_hp, ship.hp + 40)
+
+        self.run_upgrades += 1
+        self.add_toast(f"UPGRADE: {choice['name']}", choice["color"], 140)
+        self.add_floating_text(
+            ship.x + ship.width // 2,
+            ship.y - 16,
+            choice["name"],
+            choice["color"],
+        )
+        self.audio.play("upgrade")
+        self.check_achievements()
+        self.upgrade_choices = []
+        self.upgrade_buttons = {}
+        self.game_state = "playing"
+        self.next_round()
+        return True
 
     def next_round(self):
         self.round += 1
-        self.enemy = Enemy(self.round)
+        self.enemy = Enemy(self.round, self.difficulty_key)
         self.player_lasers.clear()
         self.enemy_lasers.clear()
         self.asteroids.clear()
+        self.minions.clear()
         self.powerups.clear()
         self.spaceship.hp = min(self.spaceship.max_hp, self.spaceship.hp + 22)
         self.spaceship.shield = min(
             self.spaceship.shield_max, self.spaceship.shield + 15
+        )
+        self.config.progression["best_wave"] = max(
+            self.config.progression.get("best_wave", 1), self.round
         )
         if self.round % 2 == 0:
             for _ in range(2):
@@ -1366,6 +1930,7 @@ class EnhancedGame:
                         random.choice(["health", "shield", "overdrive"]),
                     )
                 )
+        self.game_state = "playing"
         self.show_banner(f"WAVE {self.round}", self.enemy.name)
         self.audio.play("wave")
         self.check_achievements()
@@ -1377,6 +1942,9 @@ class EnhancedGame:
         self.game_over_reason = reason
         self.config.progression["games_played"] = (
             self.config.progression.get("games_played", 0) + 1
+        )
+        self.config.progression["best_wave"] = max(
+            self.config.progression.get("best_wave", 1), self.round
         )
         if victory:
             self.config.progression["victories"] = (
@@ -1402,12 +1970,18 @@ class EnhancedGame:
             "score_1000": score_for_checks >= 1000,
             "score_5000": score_for_checks >= 5000,
             "score_10000": score_for_checks >= 10000,
+            "score_25000": score_for_checks >= 25000,
             "combo_10": combo_for_checks >= 10,
             "combo_25": combo_for_checks >= 25,
             "boss_hunter": progression.get("bosses_defeated", 0) >= 10,
+            "swarm_breaker": progression.get("total_minions_defeated", 0) >= 50,
+            "dash_master": progression.get("total_dashes", 0) >= 25,
+            "fully_loaded": self.run_upgrades >= 5,
             "wave_3": self.round >= 3,
             "victory": self.game_state == "victory",
             "untouchable": self.game_state == "victory" and self.lives_lost == 0,
+            "ace_victory": self.game_state == "victory"
+            and self.difficulty_key == "ace",
             "collector": progression.get("total_powerups_collected", 0) >= 25,
             "sharpshooter": progression.get("total_lasers_fired", 0) >= 500,
         }
@@ -1437,6 +2011,8 @@ class EnhancedGame:
             self.draw_landing()
             if self.show_achievements:
                 self.draw_achievements_overlay()
+            elif self.show_stats:
+                self.draw_stats_overlay()
         else:
             self.world.fill(BLACK)
             self.draw_background(self.world)
@@ -1446,6 +2022,8 @@ class EnhancedGame:
             self.draw_banner()
             if self.game_state == "paused":
                 self.draw_pause()
+            elif self.game_state == "upgrade":
+                self.draw_upgrade()
             elif self.game_state in ("game_over", "victory"):
                 self.draw_end_screen()
 
@@ -1463,6 +2041,8 @@ class EnhancedGame:
             powerup.draw(target)
         for asteroid in self.asteroids:
             asteroid.draw(target)
+        for minion in self.minions:
+            minion.draw(target)
         for laser in self.player_lasers:
             laser.draw(target)
         for laser in self.enemy_lasers:
@@ -1485,79 +2065,122 @@ class EnhancedGame:
         self.screen.blit(text, text.get_rect(center=rect.center))
 
     def draw_landing(self):
-        self.start_button = pygame.Rect(WIDTH // 2 - 160, 710, 320, 74)
+        self.start_button = pygame.Rect(WIDTH // 2 - 160, 700, 320, 70)
 
         title_glow = self.font_huge.render("DRAGON ROASTER", True, ORANGE)
         self.screen.blit(
-            title_glow, title_glow.get_rect(center=(WIDTH // 2 + 3, 97))
+            title_glow, title_glow.get_rect(center=(WIDTH // 2 + 3, 89))
         )
         title = self.font_huge.render("DRAGON ROASTER", True, GOLD)
-        self.screen.blit(title, title.get_rect(center=(WIDTH // 2, 94)))
+        self.screen.blit(title, title.get_rect(center=(WIDTH // 2, 86)))
 
         subtitle = self.small_font.render(
             "SPACE BATTLE  •  SURVIVE 7 BOSS WAVES", True, CYAN
         )
-        self.screen.blit(subtitle, subtitle.get_rect(center=(WIDTH // 2, 154)))
+        self.screen.blit(subtitle, subtitle.get_rect(center=(WIDTH // 2, 146)))
 
-        stats_panel = pygame.Rect(90, 184, WIDTH - 180, 88)
+        stats_panel = pygame.Rect(90, 172, WIDTH - 180, 88)
         pygame.draw.rect(self.screen, (0, 0, 70), stats_panel, border_radius=9)
         pygame.draw.rect(self.screen, CYAN, stats_panel, 2, border_radius=9)
         high_score = self.config.progression.get("high_score", 0)
         high_text = self.font.render(f"HIGH SCORE  {high_score}", True, GOLD)
-        self.screen.blit(high_text, high_text.get_rect(center=(WIDTH // 2, 211)))
+        self.screen.blit(high_text, high_text.get_rect(center=(WIDTH // 2, 199)))
         stats = self.micro_font.render(
-            "BEST COMBO {}   •   BOSSES {}   •   ACHIEVEMENTS {}/{}".format(
+            "BEST COMBO {}   •   BEST WAVE {}   •   ACHIEVEMENTS {}/{}".format(
                 self.config.progression.get("best_combo", 0),
-                self.config.progression.get("bosses_defeated", 0),
+                self.config.progression.get("best_wave", 1),
                 len(self.achievements_unlocked),
                 len(ACHIEVEMENTS),
             ),
             True,
             LIGHT_BLUE,
         )
-        self.screen.blit(stats, stats.get_rect(center=(WIDTH // 2, 247)))
+        self.screen.blit(stats, stats.get_rect(center=(WIDTH // 2, 235)))
 
-        box = pygame.Rect(70, 300, WIDTH - 140, 350)
+        box = pygame.Rect(70, 276, WIDTH - 140, 300)
         pygame.draw.rect(self.screen, (0, 0, 80), box, border_radius=12)
         pygame.draw.rect(self.screen, CYAN, box, 3, border_radius=12)
 
         heading = self.small_font.render("MISSION BRIEFING", True, YELLOW)
-        self.screen.blit(heading, heading.get_rect(center=(WIDTH // 2, 329)))
+        self.screen.blit(heading, heading.get_rect(center=(WIDTH // 2, 302)))
 
         lines = [
-            ("WASD / Arrows   -   Move", WHITE),
-            ("SPACE   -   Fire        P   -   Pause", WHITE),
-            ("M   -   Mute   [ ]   -   Volume   A   -   Achievements", WHITE),
-            ("ESC   -   Menu / Back        O   -   Quit", WHITE),
+            ("WASD / Arrows - Move     SHIFT / X - Dash", WHITE),
+            ("SPACE - Fire     P - Pause     F11 - Fullscreen", WHITE),
+            ("M - Mute   [ ] - Volume   V - Particles", WHITE),
+            ("A - Achievements   S - Stats   O - Quit", WHITE),
             ("", WHITE),
-            ("Chain hits to build your COMBO multiplier.", LIGHT_BLUE),
-            ("Defeat all 7 bosses without losing every life.", LIGHT_BLUE),
+            ("Chain hits for COMBO multipliers. Clear a wave to", LIGHT_BLUE),
+            ("choose one of three permanent run upgrades.", LIGHT_BLUE),
             ("", WHITE),
             ("POWER-UPS", GOLD),
-            ("+HP   SHIELD   RAPID   SPREAD   BOMB", LIGHT_BLUE),
-            ("EXTRA LIFE   OVERDRIVE", LIGHT_BLUE),
+            ("+HP  SHIELD  RAPID  SPREAD  BOMB  LIFE  OVERDRIVE", LIGHT_BLUE),
         ]
 
-        y = 364
+        y = 334
         for text, color in lines:
             if not text:
-                y += 10
+                y += 8
                 continue
             font = self.micro_font if text not in ("POWER-UPS",) else self.tiny_font
             surface = font.render(text, True, color)
             self.screen.blit(surface, surface.get_rect(center=(WIDTH // 2, y)))
-            y += 25 if text == "POWER-UPS" else 21
+            y += 24 if text == "POWER-UPS" else 20
+
+        difficulty_heading = self.micro_font.render(
+            "DIFFICULTY", True, LIGHT_BLUE
+        )
+        self.screen.blit(
+            difficulty_heading,
+            difficulty_heading.get_rect(center=(WIDTH // 2, 595)),
+        )
+
+        palette = {"cadet": GREEN, "pilot": CYAN, "ace": ORANGE}
+        self.difficulty_buttons = {}
+        button_x = WIDTH // 2 - (3 * 190 + 2 * 20) // 2
+        for key, profile in DIFFICULTIES.items():
+            rect = pygame.Rect(button_x, 612, 190, 46)
+            self.difficulty_buttons[key] = rect
+            active = key == self.difficulty_key
+            color = palette.get(key, WHITE)
+            pygame.draw.rect(
+                self.screen,
+                color if active else (18, 18, 34),
+                rect,
+                border_radius=8,
+            )
+            pygame.draw.rect(self.screen, color, rect, 3, border_radius=8)
+            label = self.tiny_font.render(
+                profile["name"], True, BLACK if active else color
+            )
+            self.screen.blit(label, label.get_rect(center=rect.center))
+            button_x += 210
+
+        description = self.micro_font.render(
+            self.difficulty["description"], True, LIGHT_BLUE
+        )
+        self.screen.blit(
+            description, description.get_rect(center=(WIDTH // 2, 675))
+        )
 
         self._draw_button(self.start_button, "START MISSION", GREEN, (120, 255, 120))
 
         footer = self.tiny_font.render(
-            "Press ENTER or click START   •   M toggles sound", True, WHITE
+            "Press ENTER or click START   •   1-3 changes difficulty", True, WHITE
         )
-        self.screen.blit(footer, footer.get_rect(center=(WIDTH // 2, 828)))
+        self.screen.blit(footer, footer.get_rect(center=(WIDTH // 2, 800)))
 
-        if self.config.settings.get("muted", False):
-            muted = self.tiny_font.render("SOUND: OFF", True, RED)
-            self.screen.blit(muted, muted.get_rect(center=(WIDTH // 2, 860)))
+        sound_state = "OFF" if self.config.settings.get("muted", False) else "ON"
+        quality = str(
+            self.config.settings.get("particle_quality", "high")
+        ).upper()
+        options = self.micro_font.render(
+            f"SOUND {sound_state}   •   PARTICLES {quality}   •   "
+            f"DIFFICULTY {self.difficulty['name']}",
+            True,
+            GRAY,
+        )
+        self.screen.blit(options, options.get_rect(center=(WIDTH // 2, 832)))
 
         version = self.micro_font.render(f"v{VERSION}", True, GRAY)
         self.screen.blit(version, version.get_rect(center=(WIDTH // 2, HEIGHT - 24)))
@@ -1568,36 +2191,90 @@ class EnhancedGame:
         overlay.fill(BLACK)
         self.screen.blit(overlay, (0, 0))
 
-        panel = pygame.Rect(45, 70, WIDTH - 90, HEIGHT - 150)
+        panel = pygame.Rect(35, 48, WIDTH - 70, 880)
         pygame.draw.rect(self.screen, (0, 0, 55), panel, border_radius=12)
         pygame.draw.rect(self.screen, GOLD, panel, 3, border_radius=12)
 
         title = self.font.render("ACHIEVEMENTS", True, GOLD)
-        self.screen.blit(title, title.get_rect(center=(WIDTH // 2, 108)))
+        self.screen.blit(title, title.get_rect(center=(WIDTH // 2, 88)))
         count = self.micro_font.render(
             f"{len(self.achievements_unlocked)} / {len(ACHIEVEMENTS)} unlocked",
             True,
             LIGHT_BLUE,
         )
-        self.screen.blit(count, count.get_rect(center=(WIDTH // 2, 144)))
+        self.screen.blit(count, count.get_rect(center=(WIDTH // 2, 122)))
 
-        y = 184
+        y = 154
         for key, info in ACHIEVEMENTS.items():
             unlocked = key in self.achievements_unlocked
             color = GOLD if unlocked else (110, 110, 120)
             marker = "X" if unlocked else "-"
             name = self.tiny_font.render(f"[{marker}] {info['name']}", True, color)
-            self.screen.blit(name, (90, y))
+            self.screen.blit(name, (62, y))
             description = self.micro_font.render(
                 info["description"], True, WHITE if unlocked else (90, 90, 100)
             )
-            self.screen.blit(description, (116, y + 22))
-            y += 54
+            self.screen.blit(
+                description, (WIDTH - 62 - description.get_width(), y + 4)
+            )
+            y += 42
 
         footer = self.micro_font.render(
             "Press A or ESC to close", True, LIGHT_BLUE
         )
-        self.screen.blit(footer, footer.get_rect(center=(WIDTH // 2, HEIGHT - 105)))
+        self.screen.blit(footer, footer.get_rect(center=(WIDTH // 2, 894)))
+
+    def draw_stats_overlay(self):
+        overlay = pygame.Surface((WIDTH, HEIGHT))
+        overlay.set_alpha(215)
+        overlay.fill(BLACK)
+        self.screen.blit(overlay, (0, 0))
+
+        panel = pygame.Rect(55, 80, WIDTH - 110, HEIGHT - 190)
+        pygame.draw.rect(self.screen, (0, 0, 55), panel, border_radius=12)
+        pygame.draw.rect(self.screen, CYAN, panel, 3, border_radius=12)
+
+        title = self.font.render("CAREER STATS", True, CYAN)
+        self.screen.blit(title, title.get_rect(center=(WIDTH // 2, 124)))
+
+        progression = self.config.progression
+        rows = [
+            ("High score", progression.get("high_score", 0)),
+            ("Best combo", progression.get("best_combo", 0)),
+            ("Best wave", progression.get("best_wave", 1)),
+            ("Games played", progression.get("games_played", 0)),
+            ("Victories", progression.get("victories", 0)),
+            ("Bosses defeated", progression.get("bosses_defeated", 0)),
+            ("Minions destroyed", progression.get("total_minions_defeated", 0)),
+            ("Power-ups collected", progression.get("total_powerups_collected", 0)),
+            ("Lasers fired", progression.get("total_lasers_fired", 0)),
+            ("Dashes performed", progression.get("total_dashes", 0)),
+            (
+                "Achievements",
+                f"{len(self.achievements_unlocked)}/{len(ACHIEVEMENTS)}",
+            ),
+        ]
+
+        y = 186
+        for index, (label, value) in enumerate(rows):
+            row_color = (0, 0, 85) if index % 2 == 0 else (0, 0, 65)
+            pygame.draw.rect(
+                self.screen, row_color, (95, y - 4, WIDTH - 190, 34),
+                border_radius=5,
+            )
+            label_surface = self.tiny_font.render(label, True, LIGHT_BLUE)
+            self.screen.blit(label_surface, (115, y))
+            value_surface = self.tiny_font.render(str(value), True, WHITE)
+            self.screen.blit(
+                value_surface,
+                (WIDTH - 115 - value_surface.get_width(), y),
+            )
+            y += 42
+
+        footer = self.micro_font.render(
+            "Press S or ESC to close", True, LIGHT_BLUE
+        )
+        self.screen.blit(footer, footer.get_rect(center=(WIDTH // 2, y + 22)))
 
     def draw_hud(self):
         # Health bar
@@ -1633,6 +2310,30 @@ class EnhancedGame:
             f"LIVES: {self.spaceship.lives}", True, PINK
         )
         self.screen.blit(lives_text, (bar_x, HEIGHT - 145))
+
+        # Dash cooldown
+        dash_ready = self.spaceship.dash_cooldown <= 0
+        dash_ratio = 1.0 - (
+            self.spaceship.dash_cooldown / max(1, self.spaceship.dash_cooldown_max)
+        )
+        dash_color = CYAN if dash_ready else (70, 95, 125)
+        pygame.draw.rect(
+            self.screen, (15, 20, 40), (WIDTH - 205, HEIGHT - 62, 185, 30)
+        )
+        pygame.draw.rect(
+            self.screen,
+            dash_color,
+            (WIDTH - 205, HEIGHT - 62, 185 * dash_ratio, 30),
+        )
+        pygame.draw.rect(
+            self.screen, WHITE, (WIDTH - 205, HEIGHT - 62, 185, 30), 2
+        )
+        dash_text = self.tiny_font.render(
+            "DASH READY" if dash_ready else "DASH CHARGING", True, WHITE
+        )
+        self.screen.blit(
+            dash_text, dash_text.get_rect(center=(WIDTH - 112, HEIGHT - 47))
+        )
 
         powerup_y = HEIGHT - 185
         for attribute, label, color in (
@@ -1674,6 +2375,14 @@ class EnhancedGame:
         )
         wave_text = self.micro_font.render(f"BEST {best_score}", True, LIGHT_BLUE)
         self.screen.blit(wave_text, (WIDTH - 210, 46))
+        meta_text = self.micro_font.render(
+            f"{self.difficulty['name']}  •  UPGRADES {self.run_upgrades}",
+            True,
+            GOLD,
+        )
+        self.screen.blit(
+            meta_text, (WIDTH - 20 - meta_text.get_width(), 66)
+        )
 
         # Combo meter
         if self.combo >= 2:
@@ -1734,6 +2443,86 @@ class EnhancedGame:
             panel.get_rect(center=(WIDTH // 2, HEIGHT // 2 - 220)),
         )
 
+    def draw_upgrade(self):
+        overlay = pygame.Surface((WIDTH, HEIGHT))
+        overlay.set_alpha(200)
+        overlay.fill(BLACK)
+        self.screen.blit(overlay, (0, 0))
+
+        panel = pygame.Rect(60, 150, WIDTH - 120, 620)
+        pygame.draw.rect(self.screen, (0, 0, 50), panel, border_radius=12)
+        pygame.draw.rect(self.screen, GOLD, panel, 3, border_radius=12)
+
+        title = self.font_large.render(
+            f"WAVE {self.round} CLEARED", True, GOLD
+        )
+        self.screen.blit(title, title.get_rect(center=(WIDTH // 2, 188)))
+        subtitle = self.small_font.render(
+            "CHOOSE ONE UPGRADE FOR THE REST OF THE RUN", True, WHITE
+        )
+        self.screen.blit(
+            subtitle, subtitle.get_rect(center=(WIDTH // 2, 228))
+        )
+
+        self.upgrade_buttons = {}
+        card_y = 254
+        for index, choice in enumerate(self.upgrade_choices):
+            rect = pygame.Rect(90, card_y, WIDTH - 180, 118)
+            self.upgrade_buttons[index] = rect
+            hovered = rect.collidepoint(pygame.mouse.get_pos())
+            fill = (28, 28, 68) if hovered else (10, 10, 40)
+            pygame.draw.rect(self.screen, fill, rect, border_radius=12)
+            pygame.draw.rect(
+                self.screen, choice["color"], rect, 3, border_radius=12
+            )
+
+            number = self.font.render(str(index + 1), True, choice["color"])
+            self.screen.blit(
+                number, number.get_rect(center=(rect.x + 42, rect.centery))
+            )
+
+            name = self.small_font.render(choice["name"], True, WHITE)
+            self.screen.blit(name, (rect.x + 82, rect.y + 20))
+            description = self.micro_font.render(
+                choice["desc"], True, LIGHT_BLUE
+            )
+            self.screen.blit(description, (rect.x + 82, rect.y + 54))
+
+            level = self.upgrades.get(choice["key"], 0)
+            level_text = self.micro_font.render(
+                f"LEVEL {level}/{choice['max_level']}",
+                True,
+                choice["color"],
+            )
+            self.screen.blit(
+                level_text,
+                (rect.right - 24 - level_text.get_width(), rect.y + 20),
+            )
+
+            pips = 10
+            pip_width = 12
+            pip_x = rect.x + 82
+            pip_y = rect.bottom - 26
+            for pip in range(min(choice["max_level"], pips)):
+                pip_color = choice["color"] if pip < level else (55, 55, 70)
+                pygame.draw.rect(
+                    self.screen,
+                    pip_color,
+                    (pip_x + pip * (pip_width + 4), pip_y, pip_width, 8),
+                    border_radius=3,
+                )
+
+            card_y += 136
+
+        hint = self.micro_font.render(
+            "Press 1, 2 or 3 — or click a card", True, LIGHT_BLUE
+        )
+        self.screen.blit(hint, hint.get_rect(center=(WIDTH // 2, 686)))
+        footer = self.micro_font.render(
+            "Upgrades persist until this run ends", True, GRAY
+        )
+        self.screen.blit(footer, footer.get_rect(center=(WIDTH // 2, 722)))
+
     def draw_pause(self):
         overlay = pygame.Surface((WIDTH, HEIGHT))
         overlay.set_alpha(170)
@@ -1741,23 +2530,43 @@ class EnhancedGame:
         self.screen.blit(overlay, (0, 0))
 
         pause_text = self.font_huge.render("PAUSED", True, CYAN)
-        self.screen.blit(pause_text, pause_text.get_rect(center=(WIDTH // 2, 300)))
+        self.screen.blit(pause_text, pause_text.get_rect(center=(WIDTH // 2, 258)))
 
-        panel = pygame.Rect(WIDTH // 2 - 220, 360, 440, 220)
+        panel = pygame.Rect(WIDTH // 2 - 230, 310, 460, 300)
         pygame.draw.rect(self.screen, (0, 0, 70), panel, border_radius=12)
         pygame.draw.rect(self.screen, CYAN, panel, 2, border_radius=12)
 
         self.pause_buttons = {
-            "resume": pygame.Rect(WIDTH // 2 - 150, 392, 300, 54),
-            "menu": pygame.Rect(WIDTH // 2 - 150, 462, 300, 54),
+            "resume": pygame.Rect(WIDTH // 2 - 150, 338, 300, 52),
+            "mute": pygame.Rect(WIDTH // 2 - 150, 404, 300, 52),
+            "menu": pygame.Rect(WIDTH // 2 - 150, 470, 300, 52),
         }
-        self._draw_button(self.pause_buttons["resume"], "RESUME  [P]", GREEN, (120, 255, 120))
+        self._draw_button(
+            self.pause_buttons["resume"], "RESUME  [P]", GREEN, (120, 255, 120)
+        )
+        muted = self.config.settings.get("muted", False)
+        self._draw_button(
+            self.pause_buttons["mute"],
+            "SOUND: OFF  [M]" if muted else "SOUND: ON  [M]",
+            ORANGE if muted else CYAN,
+            (255, 220, 150) if muted else (150, 245, 255),
+        )
         self._draw_button(self.pause_buttons["menu"], "MENU  [ESC]", CYAN, (150, 245, 255))
 
         hint = self.micro_font.render(
-            "R restarts the mission   •   O quits the game", True, LIGHT_BLUE
+            "R restarts   •   F11 fullscreen   •   V particles   •   O quits",
+            True,
+            LIGHT_BLUE,
         )
-        self.screen.blit(hint, hint.get_rect(center=(WIDTH // 2, 548)))
+        self.screen.blit(hint, hint.get_rect(center=(WIDTH // 2, 552)))
+
+        run_stats = self.micro_font.render(
+            f"WAVE {self.round}/{MAX_ROUNDS}   •   SCORE {self.score}   •   "
+            f"UPGRADES {self.run_upgrades}   •   {self.difficulty['name']}",
+            True,
+            WHITE,
+        )
+        self.screen.blit(run_stats, run_stats.get_rect(center=(WIDTH // 2, 582)))
 
     def draw_end_screen(self):
         overlay = pygame.Surface((WIDTH, HEIGHT))
@@ -1793,23 +2602,27 @@ class EnhancedGame:
                 new_text, new_text.get_rect(center=(WIDTH // 2, 420))
             )
 
-        stats_y = 462
+        stats_y = 452
         stats = [
             f"WAVES CLEARED: {min(self.round, MAX_ROUNDS)}/{MAX_ROUNDS}",
+            f"DIFFICULTY: {self.difficulty['name']}",
             f"BEST COMBO: {self.max_combo}",
+            f"MINIONS: {self.run_minions}",
             f"POWER-UPS: {self.run_powerups}",
+            f"UPGRADES: {self.run_upgrades}",
             f"LIVES LOST: {self.lives_lost}",
+            f"DASHES: {self.run_dashes}",
         ]
         for index, text in enumerate(stats):
             row = index // 2
             column = index % 2
             surface = self.tiny_font.render(text, True, LIGHT_BLUE)
-            center = (WIDTH // 2 - 120 + column * 240, stats_y + row * 30)
+            center = (WIDTH // 2 - 120 + column * 240, stats_y + row * 28)
             self.screen.blit(surface, surface.get_rect(center=center))
 
         self.end_buttons = {
-            "restart": pygame.Rect(WIDTH // 2 - 170, 560, 160, 58),
-            "menu": pygame.Rect(WIDTH // 2 + 10, 560, 160, 58),
+            "restart": pygame.Rect(WIDTH // 2 - 170, 572, 160, 58),
+            "menu": pygame.Rect(WIDTH // 2 + 10, 572, 160, 58),
         }
         self._draw_button(
             self.end_buttons["restart"], "RESTART [R]", GREEN, (120, 255, 120)
@@ -1824,7 +2637,7 @@ class EnhancedGame:
         self.screen.blit(hint, hint.get_rect(center=(WIDTH // 2, 640)))
 
     def draw_toasts(self):
-        y = 140 if self.game_state != "landing" else 880
+        panels = []
         for toast in self.toasts:
             alpha = int(clamp(toast["timer"] * 4, 0, 255))
             surface = self.small_font.render(toast["text"], True, toast["color"])
@@ -1847,10 +2660,19 @@ class EnhancedGame:
                 center=(panel.get_width() // 2, panel.get_height() // 2)
             )
             panel.blit(surface, text_rect)
-            self.screen.blit(
-                panel, panel.get_rect(center=(WIDTH // 2, y))
-            )
-            y += panel.get_height() + 8
+            panels.append(panel)
+
+        if self.game_state == "landing":
+            # Stack upward so menu toasts never run off the bottom edge.
+            y = HEIGHT - 100
+            for panel in reversed(panels):
+                self.screen.blit(panel, panel.get_rect(center=(WIDTH // 2, y)))
+                y -= panel.get_height() + 8
+        else:
+            y = 140
+            for panel in panels:
+                self.screen.blit(panel, panel.get_rect(center=(WIDTH // 2, y)))
+                y += panel.get_height() + 8
 
     # -- input --------------------------------------------------------------
     def _handle_key(self, key):
@@ -1858,7 +2680,15 @@ class EnhancedGame:
             self.config.save()
             return False
 
-        if key == pygame.K_LEFTBRACKET or key == pygame.K_9:
+        if key == pygame.K_F11:
+            self._toggle_fullscreen()
+            return True
+
+        if key == pygame.K_v:
+            self.cycle_particle_quality()
+            return True
+
+        if key == pygame.K_LEFTBRACKET:
             volume = max(0.0, float(self.config.settings.get("sfx_volume", 0.65)) - 0.1)
             self.config.settings["sfx_volume"] = volume
             self.config.settings["music_volume"] = max(0.0, float(self.config.settings.get("music_volume", 0.35)) - 0.1)
@@ -1866,7 +2696,7 @@ class EnhancedGame:
             self.add_toast(f"VOLUME {int(volume * 100)}%", CYAN, 80)
             return True
 
-        if key == pygame.K_RIGHTBRACKET or key == pygame.K_0:
+        if key == pygame.K_RIGHTBRACKET:
             volume = min(1.0, float(self.config.settings.get("sfx_volume", 0.65)) + 0.1)
             self.config.settings["sfx_volume"] = volume
             self.config.settings["music_volume"] = min(1.0, float(self.config.settings.get("music_volume", 0.35)) + 0.1)
@@ -1876,15 +2706,37 @@ class EnhancedGame:
 
         if key == pygame.K_a and self.game_state == "landing":
             self.show_achievements = not self.show_achievements
+            self.show_stats = False
+            self.audio.play("click")
+            return True
+
+        if key == pygame.K_s and self.game_state == "landing":
+            self.show_stats = not self.show_stats
+            self.show_achievements = False
             self.audio.play("click")
             return True
 
         if key == pygame.K_m:
-            muted = self.audio.toggle_mute()
-            self.config.settings["muted"] = muted
-            self.config.save()
-            self.add_toast("SOUND OFF" if muted else "SOUND ON", CYAN, 100)
+            self.toggle_mute()
             return True
+
+        number_keys = {
+            pygame.K_1: 0,
+            pygame.K_2: 1,
+            pygame.K_3: 2,
+            pygame.K_KP1: 0,
+            pygame.K_KP2: 1,
+            pygame.K_KP3: 2,
+        }
+        if key in number_keys:
+            index = number_keys[key]
+            if self.game_state == "upgrade":
+                self.choose_upgrade(index)
+                return True
+            if self.game_state == "landing":
+                difficulty_key = tuple(DIFFICULTIES)[index]
+                self.set_difficulty(difficulty_key)
+                return True
 
         if key == pygame.K_ESCAPE:
             if self.game_state == "playing":
@@ -1895,8 +2747,13 @@ class EnhancedGame:
             elif self.game_state == "landing":
                 if self.show_achievements:
                     self.show_achievements = False
+                elif self.show_stats:
+                    self.show_stats = False
                 else:
                     return False
+            elif self.game_state == "upgrade":
+                # Do not let a stray ESC skip a free upgrade.
+                return True
             else:
                 self.return_to_menu()
             return True
@@ -1919,6 +2776,35 @@ class EnhancedGame:
                 self.start_game()
             elif self.game_state == "paused":
                 self.game_state = "playing"
+            elif self.game_state == "upgrade":
+                self.choose_upgrade(0)
+            return True
+
+        if (
+            key
+            in (
+                pygame.K_LSHIFT,
+                pygame.K_RSHIFT,
+                pygame.K_x,
+                pygame.K_LCTRL,
+                pygame.K_RCTRL,
+            )
+            and self.game_state == "playing"
+        ):
+            if self.spaceship.start_dash(pygame.key.get_pressed()):
+                self.run_dashes += 1
+                self.config.progression["total_dashes"] = (
+                    self.config.progression.get("total_dashes", 0) + 1
+                )
+                self.audio.play("dash")
+                self.add_screen_shake(5)
+                self.add_particles(
+                    self.spaceship.x + self.spaceship.width // 2,
+                    self.spaceship.y + self.spaceship.height // 2,
+                    CYAN,
+                    10,
+                    speed=4,
+                )
             return True
 
         if key == pygame.K_SPACE and self.game_state == "playing":
@@ -1927,15 +2813,30 @@ class EnhancedGame:
 
     def _handle_click(self, position):
         if self.game_state == "landing":
+            if self.show_achievements or self.show_stats:
+                return True
+            for difficulty_key, rect in self.difficulty_buttons.items():
+                if rect.collidepoint(position):
+                    self.set_difficulty(difficulty_key)
+                    return True
             if self.start_button.collidepoint(position):
                 self.start_game()
                 return True
+        elif self.game_state == "upgrade":
+            for index, rect in self.upgrade_buttons.items():
+                if rect.collidepoint(position):
+                    self.choose_upgrade(index)
+                    return True
         elif self.game_state == "paused":
             if self.pause_buttons.get("resume", pygame.Rect(0, 0, 0, 0)).collidepoint(
                 position
             ):
                 self.game_state = "playing"
                 self.audio.play("click")
+            elif self.pause_buttons.get("mute", pygame.Rect(0, 0, 0, 0)).collidepoint(
+                position
+            ):
+                self.toggle_mute()
             elif self.pause_buttons.get("menu", pygame.Rect(0, 0, 0, 0)).collidepoint(
                 position
             ):
